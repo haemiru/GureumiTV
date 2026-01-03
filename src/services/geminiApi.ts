@@ -342,8 +342,10 @@ function buildEnhancedVideoPrompt(
     totalScenes: number,
     isLastScene: boolean
 ): string {
-    // Extract dialogues from quotes in the prompt
-    const hasDialogue = userPrompt.includes('"');
+    // Parse the prompt to detect dialogue tags
+    const parsed = parseScenePrompt(userPrompt);
+    const hasDialogue = parsed.type === 'reporter' || parsed.type === 'goreumi' || userPrompt.includes('"');
+    const isSituationOnly = parsed.type === 'situation';
     const isFirstScene = sceneNumber === 1;
 
     // START with voice instruction - this is the most important thing
@@ -357,8 +359,24 @@ Voice for Gooreum-i: Use a VERY HIGH-PITCHED 4-year-old Korean baby girl voice.
 - Style: "조아조아~!", "헤헤~", "~해요~", baby lisp pronunciation
 - This voice MUST continue EXACTLY the same in scenes 2, 3, 4!
 
+=== 🔇 오디오 규칙 (매우 중요!) ===
+1. 이 영상에는 오직 구름이와 리포터의 목소리만 포함됩니다
+2. 배경 음악 절대 금지 (NO background music)
+3. 효과음 절대 금지 (NO sound effects)
+4. 환경음/주변 소리 절대 금지 (NO ambient sounds)
+
+=== 🚫 자막/텍스트 금지 ===
+- 자막 없음 (NO subtitles)
+- 화면에 글자 없음 (NO on-screen text)
+- 오직 마이크의 "Gureumi TV" 텍스트만 허용
+
+=== 장면 설명 태그 규칙 ===
+- "리포터 : " = 리포터의 대사 (리포터 목소리로 말하기)
+- "구름이 : " = 구름이의 대사 (구름이 목소리로 말하기)
+- "상황 : " = 대사 없이 행동만 표현 (완전 무음, 움직임만)
+
 [SCENE ${sceneNumber}/${totalScenes}]
-${userPrompt}
+${isSituationOnly ? `★ 상황 장면 (완전 무음) ★\n${parsed.content}\n- 이 장면에서는 어떤 소리도 포함하지 마세요` : userPrompt}
 
 === VOICE RULES ===
 1. GOOREUM-I VOICE (구름이 목소리):
@@ -381,8 +399,15 @@ CRITICAL: Continue Gooreum-i's voice EXACTLY from Scene 1!
 - DO NOT make the voice more mature or deeper!
 - If voice changes at all = REJECTED
 
+=== 🔇 오디오 규칙 ===
+- 오직 구름이와 리포터 목소리만 (배경음악/효과음/주변소리 금지)
+- "상황 :" 장면은 완전 무음
+
+=== 🚫 자막/텍스트 금지 ===
+- 화면에 어떤 글자도 넣지 마세요 (마이크의 "Gureumi TV"만 허용)
+
 [SCENE ${sceneNumber}/${totalScenes}] - 이어서 (CONTINUATION)
-${userPrompt}
+${isSituationOnly ? `★ 상황 장면 (완전 무음) ★\n${parsed.content}\n- 이 장면에서는 어떤 소리도 포함하지 마세요` : userPrompt}
 
 === 목소리 연속성 규칙 (VOICE CONTINUITY) ===
 1. 구름이 목소리 = 장면1과 100% 동일해야 함
@@ -410,7 +435,7 @@ ${userPrompt}
 - Gooreum-i is a small cute white Pomeranian (apply clothing from scene description)`;
 
     // Add dialogue rules
-    if (hasDialogue) {
+    if (hasDialogue && !isSituationOnly) {
         enhancedPrompt += `
 
 === 대사 규칙 (DIALOGUE) ===
@@ -438,9 +463,37 @@ ${userPrompt}
 
 === 최종 확인 ===
 ✓ 구름이 목소리 = 한국 4세 여자 아기 (장면1과 동일)
-✓ Gooreum-i voice = 4-year-old Korean baby girl (same as Scene 1)`;
+✓ Gooreum-i voice = 4-year-old Korean baby girl (same as Scene 1)
+✓ 배경음악/효과음/주변소리 없음
+✓ 자막/텍스트 없음`;
 
     return enhancedPrompt;
+}
+
+// Parse scene prompt to detect dialogue tags (리포터 : , 구름이 : , 상황 : )
+function parseScenePrompt(prompt: string): { type: 'reporter' | 'goreumi' | 'situation' | 'mixed'; content: string } {
+    const trimmedPrompt = prompt.trim();
+
+    // Check for "상황 : " tag first (situation/action only, no dialogue)
+    if (trimmedPrompt.startsWith('상황 :') || trimmedPrompt.startsWith('상황:')) {
+        const content = trimmedPrompt.replace(/^상황\s*:\s*/, '');
+        return { type: 'situation', content };
+    }
+
+    // Check for "리포터 : " tag (reporter dialogue)
+    if (trimmedPrompt.startsWith('리포터 :') || trimmedPrompt.startsWith('리포터:')) {
+        const content = trimmedPrompt.replace(/^리포터\s*:\s*/, '');
+        return { type: 'reporter', content };
+    }
+
+    // Check for "구름이 : " tag (Goreumi dialogue)
+    if (trimmedPrompt.startsWith('구름이 :') || trimmedPrompt.startsWith('구름이:')) {
+        const content = trimmedPrompt.replace(/^구름이\s*:\s*/, '');
+        return { type: 'goreumi', content };
+    }
+
+    // Mixed or untagged content
+    return { type: 'mixed', content: trimmedPrompt };
 }
 
 // Build unified video prompt for single video with multiple scenes
@@ -452,21 +505,43 @@ function buildUnifiedVideoPrompt(
     const sceneCount = prompts.length;
     const secondsPerScene = durationSeconds / sceneCount;
 
-    // Build scene descriptions
+    // Build scene descriptions with tag processing
     const sceneDescriptions = prompts.map((prompt, index) => {
         const startTime = index * secondsPerScene;
         const endTime = (index + 1) * secondsPerScene;
         const isLastScene = index === sceneCount - 1;
 
-        let sceneText = `[장면 ${index + 1}] (${startTime}초 ~ ${endTime}초)
-${prompt}`;
+        // Parse the prompt to detect dialogue tags
+        const parsed = parseScenePrompt(prompt);
+
+        let sceneText = `[장면 ${index + 1}] (${startTime}초 ~ ${endTime}초)\n`;
+
+        // Handle different scene types
+        if (parsed.type === 'situation') {
+            // Situation only - NO AUDIO, just movement/action
+            sceneText += `★ 상황 장면 (소리 없음) ★
+${parsed.content}
+- 이 장면에서는 어떤 소리도 포함하지 마세요 (대사, 효과음, 배경음 모두 없음)
+- 오직 움직임과 행동만 표현하세요`;
+        } else if (parsed.type === 'reporter') {
+            // Reporter dialogue
+            sceneText += `★ 리포터 대사 ★
+리포터: ${parsed.content}
+- 리포터가 마이크를 입 가까이 대고 말합니다`;
+        } else if (parsed.type === 'goreumi') {
+            // Goreumi dialogue
+            sceneText += `★ 구름이 대사 ★
+구름이: ${parsed.content}
+- 마이크를 구름이 입 가까이 대고, 구름이가 말합니다`;
+        } else {
+            // Mixed or untagged - use original prompt
+            sceneText += parsed.content;
+        }
 
         if (!isLastScene) {
-            sceneText += `
-(이 장면에서는 웃지 않기)`;
+            sceneText += `\n(이 장면에서는 웃지 않기)`;
         } else {
-            sceneText += `
-(대사가 끝난 후 함께 밝게 미소짓기)`;
+            sceneText += `\n(대사가 끝난 후 함께 밝게 미소짓기)`;
         }
 
         return sceneText;
@@ -474,6 +549,26 @@ ${prompt}`;
 
     const unifiedPrompt = `★★★ 중요: ${durationSeconds}초 길이의 영상을 생성합니다 ★★★
 이 영상은 ${sceneCount}개의 장면으로 구성됩니다. 각 장면은 약 ${secondsPerScene}초입니다.
+
+=== 🔇 오디오 규칙 (매우 중요!) ===
+★★★ 반드시 지켜야 할 규칙 ★★★
+1. 이 영상에는 오직 구름이와 리포터의 목소리만 포함됩니다
+2. 배경 음악 절대 금지 (NO background music)
+3. 효과음 절대 금지 (NO sound effects)
+4. 환경음/주변 소리 절대 금지 (NO ambient sounds)
+5. "상황 :" 으로 시작하는 장면은 완전히 무음으로 처리 (NO audio at all)
+
+=== 🚫 자막/텍스트 금지 ===
+★★★ 영상에 어떤 텍스트나 자막도 넣지 마세요 ★★★
+- 자막 없음 (NO subtitles)
+- 화면에 글자 없음 (NO on-screen text)
+- 캡션 없음 (NO captions)
+- 오직 마이크의 "Gureumi TV" 텍스트만 허용
+
+=== 장면 설명 태그 규칙 ===
+- "리포터 : " = 리포터의 대사 (리포터 목소리로 말하기)
+- "구름이 : " = 구름이의 대사 (구름이 목소리로 말하기)
+- "상황 : " = 대사 없이 행동만 표현 (완전 무음, 움직임만)
 
 === 캐릭터 음성 설정 (전체 영상에서 일관되게 유지!) ===
 
@@ -505,7 +600,10 @@ ${sceneDescriptions}
 ✓ 총 영상 길이: ${durationSeconds}초
 ✓ 구름이 목소리: 영상 전체에서 동일한 4세 아기 목소리 유지
 ✓ 리포터 목소리: 영상 전체에서 동일한 목소리 유지
-✓ 마지막 장면에서만 함께 미소`;
+✓ 마지막 장면에서만 함께 미소
+✓ 배경음악/효과음/주변소리 없음 - 오직 대사만
+✓ 자막/텍스트 없음
+✓ "상황 :" 장면은 완전 무음`;
 
     return unifiedPrompt;
 }
